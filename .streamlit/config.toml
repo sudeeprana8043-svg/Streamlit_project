@@ -7,8 +7,6 @@ font = "sans serif"
 
 [server]
 maxUploadSize = 200
-enableRunOnSave = true
-runOnSave = true
 
 [logger]
 level = "info"
