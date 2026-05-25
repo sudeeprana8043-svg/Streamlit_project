@@ -115,15 +115,31 @@ if "models_loaded" not in st.session_state:
 # LOAD MODELS (CACHED)
 # ==========================================================
 
+def extract_gdrive_file_id(value):
+    if not value:
+        return ""
+    
+    match = re.search(r"/file/d/([^/]+)", value)
+    if match:
+        return match.group(1)
+    
+    match = re.search(r"[?&]id=([^&]+)", value)
+    if match:
+        return match.group(1)
+    
+    return value.strip()
+
 def download_temporal_adapter_from_gdrive():
     adapter_path = os.path.join(MODEL_DIR, "temporal_adapter.pt")
     if os.path.exists(adapter_path):
         return
     
     if TEMPORAL_ADAPTER_GDRIVE_URL:
-        gdown.download(TEMPORAL_ADAPTER_GDRIVE_URL, adapter_path, quiet=False, fuzzy=True)
+        file_id = extract_gdrive_file_id(TEMPORAL_ADAPTER_GDRIVE_URL)
+        gdown.download(id=file_id, output=adapter_path, quiet=False)
     elif TEMPORAL_ADAPTER_GDRIVE_ID:
-        gdown.download(id=TEMPORAL_ADAPTER_GDRIVE_ID, output=adapter_path, quiet=False)
+        file_id = extract_gdrive_file_id(TEMPORAL_ADAPTER_GDRIVE_ID)
+        gdown.download(id=file_id, output=adapter_path, quiet=False)
 
 def ensure_model_files():
     os.makedirs(MODEL_DIR, exist_ok=True)
