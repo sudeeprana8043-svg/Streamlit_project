@@ -12,6 +12,8 @@ import random
 import numpy as np
 import tempfile
 import streamlit as st
+import gdown
+from huggingface_hub import hf_hub_download
 
 from datetime import datetime
 from PIL import Image
@@ -62,7 +64,10 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(APP_DIR, "model"))
-CHECKPOINT = os.getenv("CHECKPOINT", os.path.join(APP_DIR, "checkpoint-140"))
+CHECKPOINT = os.getenv("CHECKPOINT", os.path.join(MODEL_DIR, "checkpoint-140"))
+MODEL_REPO_ID = os.getenv("MODEL_REPO_ID", "")
+TEMPORAL_ADAPTER_GDRIVE_ID = os.getenv("TEMPORAL_ADAPTER_GDRIVE_ID", "")
+TEMPORAL_ADAPTER_GDRIVE_URL = os.getenv("TEMPORAL_ADAPTER_GDRIVE_URL", "")
 BASE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 EMBED_MODEL = "Qwen/Qwen3-VL-Embedding-2B"
 FRAMES = 8
@@ -75,6 +80,18 @@ CLASS_MAP = {
     0: "ANOMALOUS",
     1: "NORMAL"
 }
+
+MODEL_FILES = [
+    "binary_model.pkl",
+    "model_config.pkl",
+    "le_weapon.pkl",
+    "le_location.pkl",
+    "le_people.pkl",
+    "le_super.pkl",
+    "temporal_adapter.pt",
+    "checkpoint-140/adapter_config.json",
+    "checkpoint-140/adapter_model.safetensors"
+]
 
 # ==========================================================
 # STREAMLIT SESSION STATE
@@ -98,10 +115,45 @@ if "models_loaded" not in st.session_state:
 # LOAD MODELS (CACHED)
 # ==========================================================
 
+def download_temporal_adapter_from_gdrive():
+    adapter_path = os.path.join(MODEL_DIR, "temporal_adapter.pt")
+    if os.path.exists(adapter_path):
+        return
+    
+    if TEMPORAL_ADAPTER_GDRIVE_URL:
+        gdown.download(TEMPORAL_ADAPTER_GDRIVE_URL, adapter_path, quiet=False, fuzzy=True)
+    elif TEMPORAL_ADAPTER_GDRIVE_ID:
+        gdown.download(id=TEMPORAL_ADAPTER_GDRIVE_ID, output=adapter_path, quiet=False)
+
+def ensure_model_files():
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    download_temporal_adapter_from_gdrive()
+    missing = [name for name in MODEL_FILES if not os.path.exists(os.path.join(MODEL_DIR, name))]
+    
+    if missing and MODEL_REPO_ID:
+        for name in missing:
+            downloaded_path = hf_hub_download(
+                repo_id=MODEL_REPO_ID,
+                filename=name,
+                local_dir=MODEL_DIR,
+                local_dir_use_symlinks=False
+            )
+            if not os.path.exists(downloaded_path):
+                raise FileNotFoundError(f"Could not download {name} from {MODEL_REPO_ID}")
+        missing = [name for name in MODEL_FILES if not os.path.exists(os.path.join(MODEL_DIR, name))]
+    
+    if missing:
+        raise FileNotFoundError(
+            "Missing model files in MODEL_DIR: " + ", ".join(missing) +
+            f". Current MODEL_DIR: {MODEL_DIR}. Add these files to the repo under model/ " +
+            "or set MODEL_REPO_ID to a Hugging Face repo containing them."
+        )
+
 @st.cache_resource
 def load_all_models():
     try:
         with st.spinner("🚦 Loading models (this may take a few minutes)..."):
+            ensure_model_files()
             
             # Load model files
             binary_model = joblib.load(f"{MODEL_DIR}/binary_model.pkl")
@@ -164,6 +216,12 @@ def load_all_models():
             }
     except Exception as e:
         st.error(f"❌ Error loading models: {str(e)}")
+        st.info(
+            "Model artifacts are not included in the deployed app. "
+            "Upload the required files under a `model/` folder in the repository, "
+            "or create a Hugging Face model repository containing these files and set "
+            "`MODEL_REPO_ID` in Streamlit secrets."
+        )
         return None
 
 # ==========================================================
@@ -587,6 +645,9 @@ with tab3:
     st.json({
         "MODEL_DIR": MODEL_DIR,
         "CHECKPOINT": CHECKPOINT,
+        "MODEL_REPO_ID": MODEL_REPO_ID,
+        "TEMPORAL_ADAPTER_GDRIVE_ID_SET": bool(TEMPORAL_ADAPTER_GDRIVE_ID),
+        "TEMPORAL_ADAPTER_GDRIVE_URL_SET": bool(TEMPORAL_ADAPTER_GDRIVE_URL),
         "DEVICE": DEVICE,
         "BASE_MODEL": BASE_MODEL,
         "EMBED_MODEL": EMBED_MODEL,
@@ -594,6 +655,8 @@ with tab3:
         "SAVE_DIR": SAVE_DIR,
         "VIDEO_DIR": VIDEO_DIR
     })
+    st.write("**Required model files:**")
+    st.code("\n".join(MODEL_FILES), language="text")
 
 # Footer
 st.sidebar.markdown("---")
