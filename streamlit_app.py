@@ -38,7 +38,6 @@ try:
 except ImportError:
     from transformers import AutoModelForCausalLM as Qwen3VLForConditionalGeneration
 
-from peft import PeftModel
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -61,13 +60,15 @@ set_seed(42)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Updated to local paths
-MODEL_DIR = r"C:\Project\MTech\Project\Data\model"
-CHECKPOINT = r"C:\Project\MTech\Project\Data\checkpoint-140"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(APP_DIR, "model"))
+CHECKPOINT = os.getenv("CHECKPOINT", os.path.join(APP_DIR, "checkpoint-140"))
 BASE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
+EMBED_MODEL = "Qwen/Qwen3-VL-Embedding-2B"
 FRAMES = 8
 
-SAVE_DIR = r"C:\Project\MTech\Project\Data\generated_summaries"
+SAVE_DIR = os.getenv("SAVE_DIR", os.path.join(APP_DIR, "generated_summaries"))
+VIDEO_DIR = os.getenv("VIDEO_DIR", os.path.join(APP_DIR, "Anomaly-Videos-Part-1"))
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 CLASS_MAP = {
@@ -113,10 +114,11 @@ def load_all_models():
             config["n_cat"] = len(le_cat.classes_)
             
             # Load Qwen models
-            qwen_processor = AutoProcessor.from_pretrained(BASE_MODEL)
+            dtype = torch.float16 if DEVICE == "cuda" else torch.float32
+            qwen_processor = AutoProcessor.from_pretrained(EMBED_MODEL)
             qwen = AutoModel.from_pretrained(
-                BASE_MODEL,
-                torch_dtype=torch.bfloat16
+                EMBED_MODEL,
+                torch_dtype=dtype
             ).to(DEVICE)
             qwen.eval()
             
@@ -124,17 +126,23 @@ def load_all_models():
             summ_processor = AutoProcessor.from_pretrained(BASE_MODEL)
             base_model = Qwen3VLForConditionalGeneration.from_pretrained(
                 BASE_MODEL,
-                torch_dtype=torch.bfloat16
+                torch_dtype=dtype
             ).to(DEVICE)
             
-            summ_model = PeftModel.from_pretrained(base_model, CHECKPOINT)
-            summ_model.to(DEVICE)
+            try:
+                from peft import PeftModel
+                summ_model = PeftModel.from_pretrained(base_model, CHECKPOINT)
+                summ_model.to(DEVICE)
+            except Exception as peft_error:
+                st.warning(f"LoRA checkpoint could not be loaded; using base summary model. Details: {peft_error}")
+                summ_model = base_model
             summ_model.eval()
             
             # Load temporal adapter
             temporal_adapter = TemporalAdapter(config)
             temporal_adapter.load_state_dict(
-                torch.load(f"{MODEL_DIR}/temporal_adapter.pt", map_location=DEVICE)
+                torch.load(f"{MODEL_DIR}/temporal_adapter.pt", map_location=DEVICE),
+                strict=False
             )
             temporal_adapter.to(DEVICE)
             temporal_adapter.eval()
@@ -171,6 +179,8 @@ class TemporalAdapter(nn.Module):
         )
     
     def forward(self, x):
+        if x.dim() == 3:
+            x = x.mean(dim=1)
         return self.fc(x)
 
 # ==========================================================
@@ -387,6 +397,37 @@ def build_context(video_path, models):
     return context, frames
 
 # ==========================================================
+# Q&A FUNCTION
+# ==========================================================
+
+def answer_question(context, question):
+    """Route questions to relevant context"""
+    q_lower = question.lower()
+    
+    # Status questions
+    if any(w in q_lower for w in ["normal", "anomalous", "status", "safe"]):
+        return f"The video shows **{context['binary_class']}** activity (confidence: {context['binary_confidence']:.2%})"
+    
+    # People questions
+    if any(w in q_lower for w in ["people", "person", "how many", "number", "count"]):
+        return f"People detected: **{context['people']}**"
+    
+    # Weapon questions
+    if any(w in q_lower for w in ["weapon", "gun", "knife", "armed", "used"]):
+        return f"Weapon type: **{context['weapon']}**"
+    
+    # Location questions
+    if any(w in q_lower for w in ["location", "where", "place", "located"]):
+        return f"Location type: **{context['location']}**"
+    
+    # Category questions
+    if any(w in q_lower for w in ["category", "type", "event", "what is happening", "what"]):
+        return f"Event category: **{context['category']}**. Summary: {context['summary']}"
+    
+    # Default summary
+    return context["summary"]
+
+# ==========================================================
 # STREAMLIT UI
 # ==========================================================
 
@@ -484,7 +525,7 @@ with tab2:
     st.header("📁 Select Local Video")
     
     # Show available videos
-    video_dir = r"C:\Project\MTech\Project\Data\Anomaly-Videos-Part-1"
+    video_dir = VIDEO_DIR
     
     if os.path.exists(video_dir):
         video_files = []
@@ -548,40 +589,11 @@ with tab3:
         "CHECKPOINT": CHECKPOINT,
         "DEVICE": DEVICE,
         "BASE_MODEL": BASE_MODEL,
+        "EMBED_MODEL": EMBED_MODEL,
         "FRAMES": FRAMES,
-        "SAVE_DIR": SAVE_DIR
+        "SAVE_DIR": SAVE_DIR,
+        "VIDEO_DIR": VIDEO_DIR
     })
-
-# ==========================================================
-# Q&A FUNCTION
-# ==========================================================
-
-def answer_question(context, question):
-    """Route questions to relevant context"""
-    q_lower = question.lower()
-    
-    # Status questions
-    if any(w in q_lower for w in ["normal", "anomalous", "status", "safe"]):
-        return f"The video shows **{context['binary_class']}** activity (confidence: {context['binary_confidence']:.2%})"
-    
-    # People questions
-    if any(w in q_lower for w in ["people", "person", "how many", "number", "count"]):
-        return f"People detected: **{context['people']}**"
-    
-    # Weapon questions
-    if any(w in q_lower for w in ["weapon", "gun", "knife", "armed", "used"]):
-        return f"Weapon type: **{context['weapon']}**"
-    
-    # Location questions
-    if any(w in q_lower for w in ["location", "where", "place", "located"]):
-        return f"Location type: **{context['location']}**"
-    
-    # Category questions
-    if any(w in q_lower for w in ["category", "type", "event", "what is happening", "what"]):
-        return f"Event category: **{context['category']}**. Summary: {context['summary']}"
-    
-    # Default summary
-    return context["summary"]
 
 # Footer
 st.sidebar.markdown("---")
