@@ -194,8 +194,17 @@ def load_all_models(progress=None):
     dtype = torch.float16 if DEVICE == "cuda" else torch.float32
 
     log("Loading embedding model (Qwen3-VL-Embedding)...")
-    qwen_processor = AutoProcessor.from_pretrained(EMBED_MODEL)
-    qwen = AutoModel.from_pretrained(EMBED_MODEL, torch_dtype=dtype).to(DEVICE)
+    # Must match the training class (Qwen3VLForConditionalGeneration); loading
+    # this checkpoint as AutoModel yields a different hidden_states[-1] space,
+    # which pushes the clf_* heads off-distribution (e.g. people always "1").
+    qwen_processor = AutoProcessor.from_pretrained(EMBED_MODEL, trust_remote_code=True)
+    try:
+        qwen = Qwen3VLForConditionalGeneration.from_pretrained(
+            EMBED_MODEL, torch_dtype=dtype, trust_remote_code=True
+        ).to(DEVICE)
+    except Exception as embed_err:
+        log(f"Qwen3VLForConditionalGeneration load failed ({embed_err}); falling back to AutoModel.")
+        qwen = AutoModel.from_pretrained(EMBED_MODEL, torch_dtype=dtype).to(DEVICE)
     qwen.eval()
 
     log("Loading summarization model (Qwen3-VL)...")
@@ -386,7 +395,7 @@ def predict_multiclass(frames, summary, models):
     people = _pred("clf_people", "le_people")
     weapon = _pred("clf_weapon", "le_weapon")
     location = _pred("clf_location", "le_location")
-    category = _pred("clf_action_super", "le_super")
+    category = _pred("clf_action_super", "le_action_super")
 
     actions = None
     try:
