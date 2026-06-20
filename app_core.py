@@ -389,13 +389,32 @@ def predict_multiclass(frames, summary, models):
     vec = embed_for_multiclass(frames, summary, models)
     X = [vec]
 
-    def _pred(clf_key, le_key):
-        return bundle[le_key].inverse_transform(bundle[clf_key].predict(X))[0]
+    def _first_key(candidates):
+        for k in candidates:
+            if k in bundle:
+                return k
+        return None
 
-    people = _pred("clf_people", "le_people")
-    weapon = _pred("clf_weapon", "le_weapon")
-    location = _pred("clf_location", "le_location")
-    category = _pred("clf_action_super", "le_action_super")
+    def _pred(clf_candidates, le_candidates):
+        # Bundle key names vary across training script versions, so resolve
+        # against whatever this bundle actually contains and degrade to
+        # "unknown" if a head is missing rather than crashing.
+        clf_key = _first_key(clf_candidates)
+        le_key = _first_key(le_candidates)
+        if clf_key is None or le_key is None:
+            return "unknown"
+        try:
+            return bundle[le_key].inverse_transform(bundle[clf_key].predict(X))[0]
+        except Exception:
+            return "unknown"
+
+    people = _pred(["clf_people"], ["le_people"])
+    weapon = _pred(["clf_weapon"], ["le_weapon"])
+    location = _pred(["clf_location"], ["le_location"])
+    category = _pred(
+        ["clf_action_super", "clf_super", "clf_category", "clf_cat"],
+        ["le_action_super", "le_super", "le_category", "le_cat"],
+    )
 
     actions = None
     try:
