@@ -213,14 +213,23 @@ def load_all_models(progress=None):
         summ_model = base_model
     summ_model.eval()
 
-    log("Loading temporal adapter...")
-    temporal_adapter = TemporalAdapter(config)
-    temporal_adapter.load_state_dict(
-        torch.load(f"{MODEL_DIR}/temporal_adapter.pt", map_location=DEVICE),
-        strict=False,
-    )
-    temporal_adapter.to(DEVICE)
-    temporal_adapter.eval()
+    # Prefer the trained multi-class bundle (clf_*) over the temporal adapter.
+    mc_bundle = None
+    bundle_path = f"{MODEL_DIR}/multiclass_bundle.pkl"
+    if os.path.exists(bundle_path):
+        log("Loading multi-class bundle (clf_*)...")
+        mc_bundle = joblib.load(bundle_path)
+
+    temporal_adapter = None
+    if mc_bundle is None:
+        log("Loading temporal adapter...")
+        temporal_adapter = TemporalAdapter(config)
+        temporal_adapter.load_state_dict(
+            torch.load(f"{MODEL_DIR}/temporal_adapter.pt", map_location=DEVICE, weights_only=True),
+            strict=False,
+        )
+        temporal_adapter.to(DEVICE)
+        temporal_adapter.eval()
 
     log("All models loaded.")
 
@@ -236,6 +245,7 @@ def load_all_models(progress=None):
         "qwen_processor": qwen_processor,
         "summ_processor": summ_processor,
         "temporal_adapter": temporal_adapter,
+        "mc_bundle": mc_bundle,
     }
     return _MODELS
 
@@ -308,6 +318,93 @@ def embed_frames(frames, models):
 
 
 # ==========================================================
+# MULTI-CLASS EMBEDDING + PREDICTION (trained clf_* bundle)
+# ==========================================================
+
+def _embed_text(text, models):
+    """Last-token, L2-normalized embedding of a text-only prompt."""
+    qwen = models["qwen"]
+    proc = models["qwen_processor"]
+    messages = [{"role": "user", "content": [{"type": "text", "text": text}]}]
+    chat = proc.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    inputs = proc(text=[chat], return_tensors="pt").to(DEVICE)
+    with torch.no_grad():
+        out = qwen(**inputs, output_hidden_states=True)
+    emb = F.normalize(out.hidden_states[-1][:, -1, :], dim=-1)
+    return emb.squeeze(0).float().cpu().numpy()
+
+
+def embed_for_multiclass(frames, summary, models):
+    """Reproduce the training-time feature: per-frame visual embeddings
+    (instruction + optional summary) averaged, fused 70/30 with a text-only
+    summary embedding. Matches extract_qwen_features in the training script."""
+    qwen = models["qwen"]
+    proc = models["qwen_processor"]
+    bundle = models["mc_bundle"]
+    base_instr = bundle.get(
+        "embed_instruction",
+        "Represent this surveillance video for crime activity classification.",
+    )
+    summary = (summary or "").strip()
+    img_instr = f"{base_instr}\n\nVideo Summary: {summary}" if summary else base_instr
+
+    frame_embs = []
+    for img in frames:
+        messages = [
+            {"role": "user", "content": [
+                {"type": "image"}, {"type": "text", "text": img_instr}]}
+        ]
+        chat = proc.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+        inputs = proc(text=[chat], images=[img], return_tensors="pt").to(DEVICE)
+        with torch.no_grad():
+            out = qwen(**inputs, output_hidden_states=True)
+        emb = F.normalize(out.hidden_states[-1][:, -1, :], dim=-1)
+        frame_embs.append(emb.squeeze(0).float().cpu().numpy())
+
+    visual = np.mean(frame_embs, axis=0)
+
+    if summary:
+        text_emb = _embed_text(f"Video Summary: {summary}\n\n{base_instr}", models)
+        combined = 0.7 * visual + 0.3 * text_emb
+        norm = np.linalg.norm(combined)
+        if norm > 0:
+            combined = combined / norm
+        return combined
+    return visual
+
+
+def predict_multiclass(frames, summary, models):
+    """Predict people/weapon/location/category (+ multi-label actions) using
+    the trained clf_* bundle. Returns (people, weapon, location, category, actions)."""
+    bundle = models["mc_bundle"]
+    vec = embed_for_multiclass(frames, summary, models)
+    X = [vec]
+
+    def _pred(clf_key, le_key):
+        return bundle[le_key].inverse_transform(bundle[clf_key].predict(X))[0]
+
+    people = _pred("clf_people", "le_people")
+    weapon = _pred("clf_weapon", "le_weapon")
+    location = _pred("clf_location", "le_location")
+    category = _pred("clf_action_super", "le_super")
+
+    actions = None
+    try:
+        clf_ml = bundle["clf_action_multilabel"]
+        mlb = bundle["mlb_action"]
+        proba = clf_ml.predict_proba(X)[0]
+        thr = bundle.get("ml_best_threshold", 0.5)
+        mask = proba >= thr
+        if not mask.any():
+            mask[int(np.argmax(proba))] = True
+        actions = list(np.array(mlb.classes_)[mask])
+    except Exception:
+        actions = None
+
+    return people, weapon, location, category, actions
+
+
+# ==========================================================
 # CLEAN OUTPUT
 # ==========================================================
 
@@ -355,7 +452,8 @@ def summarize_video(frames, models):
     if not frames:
         return "No frames to summarize"
 
-    img = frames[0]
+    # Use a middle frame; the first frame is often black/blank in surveillance clips.
+    img = frames[len(frames) // 2]
 
     messages = [
         {
@@ -423,24 +521,39 @@ def build_context(video_path, models):
     )
     multi_out = multi_out.cpu().detach().numpy()
 
-    n_ppl = len(models["le_ppl"].classes_)
-    n_wpn = len(models["le_wpn"].classes_)
-    n_loc = len(models["le_loc"].classes_)
+    # Slice using the class counts the adapter was built with (config), not
+    # len(le_*); a config/encoder mismatch would otherwise yield an empty slice.
+    cfg = models["config"]
+    total = multi_out.shape[1]
+    n_ppl = cfg.get("n_ppl", len(models["le_ppl"].classes_))
+    n_wpn = cfg.get("n_wpn", len(models["le_wpn"].classes_))
+    n_loc = cfg.get("n_loc", len(models["le_loc"].classes_))
+    n_cat = cfg.get("n_cat", max(total - n_ppl - n_wpn - n_loc, 0))
 
-    ppl_preds = np.argmax(multi_out[:, :n_ppl], axis=1)
-    wpn_preds = np.argmax(multi_out[:, n_ppl:n_ppl + n_wpn], axis=1)
-    loc_preds = np.argmax(multi_out[:, n_ppl + n_wpn:n_ppl + n_wpn + n_loc], axis=1)
-    cat_preds = np.argmax(multi_out[:, n_ppl + n_wpn + n_loc:], axis=1)
+    def _seg_argmax(start, length):
+        seg = multi_out[:, start:start + length]
+        if seg.shape[1] == 0:
+            return np.zeros(multi_out.shape[0], dtype=int)
+        return np.argmax(seg, axis=1)
+
+    def _safe_inv(le, preds):
+        idx = np.clip(preds, 0, len(le.classes_) - 1)
+        return le.inverse_transform(idx)
+
+    ppl_preds = _seg_argmax(0, n_ppl)
+    wpn_preds = _seg_argmax(n_ppl, n_wpn)
+    loc_preds = _seg_argmax(n_ppl + n_wpn, n_loc)
+    cat_preds = _seg_argmax(n_ppl + n_wpn + n_loc, n_cat)
 
     summary = summarize_video(frames, models)
 
     context = {
         "binary_class": CLASS_MAP[binary_pred],
         "binary_confidence": float(binary_conf),
-        "people": models["le_ppl"].inverse_transform(ppl_preds)[0],
-        "weapon": models["le_wpn"].inverse_transform(wpn_preds)[0],
-        "location": models["le_loc"].inverse_transform(loc_preds)[0],
-        "category": models["le_cat"].inverse_transform(cat_preds)[0],
+        "people": _safe_inv(models["le_ppl"], ppl_preds)[0],
+        "weapon": _safe_inv(models["le_wpn"], wpn_preds)[0],
+        "location": _safe_inv(models["le_loc"], loc_preds)[0],
+        "category": _safe_inv(models["le_cat"], cat_preds)[0],
         "summary": summary,
         "frames": frames,
     }

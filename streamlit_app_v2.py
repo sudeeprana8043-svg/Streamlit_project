@@ -84,32 +84,56 @@ def build_context_v2(video_path, models):
         DEVICE,
     )
 
-    # ---- Multi-class detection: per-frame embeddings + temporal adapter ----
-    emb_seq = core.embed_frames(frames, models)
-    multi_out = models["temporal_adapter"](
-        torch.from_numpy(emb_seq).float().to(DEVICE)
-    ).cpu().detach().numpy()
-
-    n_ppl = len(models["le_ppl"].classes_)
-    n_wpn = len(models["le_wpn"].classes_)
-    n_loc = len(models["le_loc"].classes_)
-
-    ppl_preds = np.argmax(multi_out[:, :n_ppl], axis=1)
-    wpn_preds = np.argmax(multi_out[:, n_ppl:n_ppl + n_wpn], axis=1)
-    loc_preds = np.argmax(multi_out[:, n_ppl + n_wpn:n_ppl + n_wpn + n_loc], axis=1)
-    cat_preds = np.argmax(multi_out[:, n_ppl + n_wpn + n_loc:], axis=1)
-
-    # ---- Summarization ----
+    # ---- Summarization (also used to enrich the multi-class embedding) ----
     summary = core.summarize_video(frames, models)
+
+    # ---- Multi-class attributes ----
+    if models.get("mc_bundle") is not None:
+        # Preferred: trained clf_* heads on the fused (visual + summary) embedding
+        people, weapon, location, category, actions = core.predict_multiclass(
+            frames, summary, models
+        )
+    else:
+        # Legacy fallback: temporal adapter. Slice using the SAME class counts
+        # the adapter was built with (config), not len(le_*), to avoid an
+        # out-of-range (empty) slice -> argmax([]) crash.
+        emb_seq = core.embed_frames(frames, models)
+        multi_out = models["temporal_adapter"](
+            torch.from_numpy(emb_seq).float().to(DEVICE)
+        ).cpu().detach().numpy()
+
+        cfg = models["config"]
+        total = multi_out.shape[1]
+        n_ppl = cfg.get("n_ppl", len(models["le_ppl"].classes_))
+        n_wpn = cfg.get("n_wpn", len(models["le_wpn"].classes_))
+        n_loc = cfg.get("n_loc", len(models["le_loc"].classes_))
+        n_cat = cfg.get("n_cat", max(total - n_ppl - n_wpn - n_loc, 0))
+
+        def _seg_argmax(start, length):
+            seg = multi_out[:, start:start + length]
+            if seg.shape[1] == 0:
+                return np.zeros(multi_out.shape[0], dtype=int)
+            return np.argmax(seg, axis=1)
+
+        def _safe_inv(le, preds):
+            idx = np.clip(preds, 0, len(le.classes_) - 1)
+            return le.inverse_transform(idx)
+
+        people = _safe_inv(models["le_ppl"], _seg_argmax(0, n_ppl))[0]
+        weapon = _safe_inv(models["le_wpn"], _seg_argmax(n_ppl, n_wpn))[0]
+        location = _safe_inv(models["le_loc"], _seg_argmax(n_ppl + n_wpn, n_loc))[0]
+        category = _safe_inv(models["le_cat"], _seg_argmax(n_ppl + n_wpn + n_loc, n_cat))[0]
+        actions = None
 
     context = {
         "binary_class": binary_class,
         "binary_confidence": float(binary_conf),
         "binary_parts": binary_parts,
-        "people": models["le_ppl"].inverse_transform(ppl_preds)[0],
-        "weapon": models["le_wpn"].inverse_transform(wpn_preds)[0],
-        "location": models["le_loc"].inverse_transform(loc_preds)[0],
-        "category": models["le_cat"].inverse_transform(cat_preds)[0],
+        "people": people,
+        "weapon": weapon,
+        "location": location,
+        "category": category,
+        "actions": actions,
         "summary": summary,
         "frames": frames,
     }
@@ -188,6 +212,8 @@ with tab1:
                         st.metric("Weapon", context["weapon"])
                         st.metric("Location", context["location"])
                         st.metric("Category", context["category"])
+                        if context.get("actions"):
+                            st.metric("Detected Actions", ", ".join(context["actions"]))
 
                     with col2:
                         st.subheader("Summary")
@@ -250,6 +276,8 @@ with tab2:
                             st.metric("Weapon", context["weapon"])
                             st.metric("Location", context["location"])
                             st.metric("Category", context["category"])
+                            if context.get("actions"):
+                                st.metric("Detected Actions", ", ".join(context["actions"]))
 
                         with col2:
                             st.subheader("Summary")
