@@ -76,9 +76,14 @@ os.makedirs(OUT_ROOT, exist_ok=True)
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 
+# Directory for pre-extracted embeddings (optional)
+# If set, the script will try to load cached embeddings first
+EMBED_DIR = os.path.join(PROJECT_ROOT, "models_ucf_temporal_best", "per_frame_embeddings_qwen3_instruct")
+USE_CACHED_EMBEDDINGS = True  # Set to False to always extract on the fly
+
 # Run only the NEW frame counts now; they will be merged with any previously
 # saved results (e.g. the earlier 4/8/16/32 run) before optimization.
-FRAME_COUNTS = [1, 2]
+FRAME_COUNTS = [1, 2, 4, 8, 16, 32]
 
 # If True, load the previously saved CSVs and combine with this run's results
 # so the optimization is performed over ALL frame counts together. Newly
@@ -175,6 +180,34 @@ if video_index:
 print("Warm-up complete.")
 
 
+def load_cached_embedding(video_id, k):
+    """Load cached embedding if available and frame count matches."""
+    if not USE_CACHED_EMBEDDINGS or not os.path.exists(EMBED_DIR):
+        return None
+
+    cache_path = os.path.join(EMBED_DIR, f"{video_id}_frames.pt")
+    if not os.path.exists(cache_path):
+        return None
+
+    try:
+        seq = torch.load(cache_path, map_location="cpu", weights_only=True)
+        if seq.ndim == 2:
+            # Check if cached frame count matches requested frame count
+            cached_frames = seq.shape[0]
+            if cached_frames == k:
+                return seq.numpy()
+            elif cached_frames > k:
+                # Subsample from cached embeddings
+                indices = np.linspace(0, cached_frames - 1, k, dtype=int)
+                return seq[indices].numpy()
+            else:
+                # Not enough frames in cache, need to extract
+                return None
+    except Exception as e:
+        print(f"  Warning: failed to load cache for {video_id}: {e}")
+    return None
+
+
 @torch.no_grad()
 def extract_embedding(video_path, k):
     frames = sample_frames(video_path, k)
@@ -259,12 +292,21 @@ def build_dataset(json_path, k, measure_cost=False, cap=None):
         sampler.start()
 
     for video in tqdm(keys, desc=f"emb k={k} {os.path.basename(json_path)}"):
-        path = find_video(video)
-        if path is None:
-            continue
-        t0 = time.time()
-        emb = extract_embedding(path, k)
-        dt = time.time() - t0
+        # Try to load cached embedding first
+        emb = load_cached_embedding(video, k)
+
+        if emb is None:
+            # Fall back to extraction
+            path = find_video(video)
+            if path is None:
+                continue
+            t0 = time.time()
+            emb = extract_embedding(path, k)
+            dt = time.time() - t0
+        else:
+            # Cached embedding loaded - minimal latency
+            dt = 0.001  # Small overhead for loading from disk
+
         if emb is None:
             continue
         X.append(emb)

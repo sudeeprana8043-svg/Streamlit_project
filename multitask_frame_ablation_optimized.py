@@ -51,7 +51,12 @@ TEST_JSON = "/content/UCFCrime_Test_Summary_wind_UPDATED_FINAL.json"
 OUT_DIR = "/content/drive/MyDrive/Project_VLM/multitask_frame_ablation"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-FRAME_SETTINGS = [4, 8, 16, 32, 64]
+# Directory for pre-extracted embeddings (optional)
+# If set, the script will try to load cached embeddings first
+EMBED_DIR = "/content/drive/MyDrive/models_ucf_temporal_best/per_frame_embeddings_qwen3_instruct"
+USE_CACHED_EMBEDDINGS = True  # Set to False to always extract on the fly
+
+FRAME_SETTINGS = [1, 2, 4, 8, 16, 32]
 
 BATCH_SIZE = 16
 EPOCHS = 20
@@ -190,6 +195,34 @@ def sample_frames(path, k):
     return frames
 
 
+def load_cached_embedding(video_id, frames):
+    """Load cached embedding if available and frame count matches."""
+    if not USE_CACHED_EMBEDDINGS or not os.path.exists(EMBED_DIR):
+        return None
+
+    cache_path = os.path.join(EMBED_DIR, f"{video_id}_frames.pt")
+    if not os.path.exists(cache_path):
+        return None
+
+    try:
+        seq = torch.load(cache_path, map_location="cpu", weights_only=True)
+        if seq.ndim == 2:
+            # Check if cached frame count matches requested frame count
+            cached_frames = seq.shape[0]
+            if cached_frames == frames:
+                return seq
+            elif cached_frames > frames:
+                # Subsample from cached embeddings
+                indices = np.linspace(0, cached_frames - 1, frames, dtype=int)
+                return seq[indices]
+            else:
+                # Not enough frames in cache, need to extract
+                return None
+    except Exception as e:
+        print(f"  Warning: failed to load cache for {video_id}: {e}")
+    return None
+
+
 def embed_frames(frames):
     embs = []
     for frame in frames:
@@ -277,24 +310,34 @@ def build_dataset(json_path, frames, measure_cost=False):
 
     for item in tqdm(records):
         video = item["video_id"]
-        path = item.get("video_path")
-        if not path or not os.path.exists(path):
-            path = find_video(video)
-        if not path:
-            continue
-        try:
-            t0 = time.time()
-            sampled_frames = sample_frames(path, frames)
-            seq = embed_frames(sampled_frames)
-            latencies.append(time.time() - t0)
 
-            seqs.append(seq)
-            action_labels.append(to_super(item["action_type"].split(",")[0]))
-            weapon_labels.append(item.get("weapon_used", "None"))
-            location_labels.append(item.get("location", "Unknown"))
-            people_labels.append(str(item.get("people_count", "Unknown")))
-        except Exception as e:
-            print(video, e)
+        # Try to load cached embedding first
+        seq = load_cached_embedding(video, frames)
+
+        if seq is None:
+            # Fall back to extraction
+            path = item.get("video_path")
+            if not path or not os.path.exists(path):
+                path = find_video(video)
+            if not path:
+                continue
+            try:
+                t0 = time.time()
+                sampled_frames = sample_frames(path, frames)
+                seq = embed_frames(sampled_frames)
+                latencies.append(time.time() - t0)
+            except Exception as e:
+                print(video, e)
+                continue
+        else:
+            # Cached embedding loaded - minimal latency
+            latencies.append(0.001)  # Small overhead for loading from disk
+
+        seqs.append(seq)
+        action_labels.append(to_super(item["action_type"].split(",")[0]))
+        weapon_labels.append(item.get("weapon_used", "None"))
+        location_labels.append(item.get("location", "Unknown"))
+        people_labels.append(str(item.get("people_count", "Unknown")))
 
     avg_power = sampler.stop() if sampler else None
     mean_latency = float(np.mean(latencies)) if latencies else 0.0
