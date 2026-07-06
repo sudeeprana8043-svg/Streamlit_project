@@ -158,7 +158,7 @@ See `STREAMLIT_DEPLOYMENT_GUIDE.md` for detailed instructions
 
 | Metric | Value |
 |--------|-------|
-| Model Size | 4.26 GB (Qwen3-VL-2B-Instruct, 2B parameters) |
+| Model Size | 2B parameters (Qwen3-VL-2B-Instruct) |
 | Inference Time | 30-60 seconds per video |
 | Frame Processing | 8 evenly-spaced frames |
 | Supported Formats | MP4, AVI, MOV, MKV |
