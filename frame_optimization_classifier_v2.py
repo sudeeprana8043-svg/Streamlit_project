@@ -121,23 +121,6 @@ model.eval()
 print("Frozen Qwen loaded.")
 
 # ----------------------------------------------------------
-# WARM-UP RUN (to exclude initialization time from latency)
-# ----------------------------------------------------------
-print("Warming up model (excluding initialization time from latency)...")
-warmup_frames = sample_frames(find_video(list(video_index.keys())[0]), min(FRAME_COUNTS))
-if warmup_frames:
-    warmup_imgs = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in warmup_frames[:1]]
-    warmup_convo = [{"role": "user", "content": [
-        {"type": "text", "text": "Warm up."},
-        {"type": "image", "image": warmup_imgs[0]}]}]
-    warmup_text = processor.apply_chat_template(warmup_convo, tokenize=False,
-                                                 add_generation_prompt=True)
-    warmup_inputs = processor(images=[warmup_imgs[0]], text=warmup_text, return_tensors="pt").to(DEVICE)
-    with torch.no_grad():
-        _ = model(**warmup_inputs, output_hidden_states=True)
-print("Warm-up complete.")
-
-# ----------------------------------------------------------
 # VIDEO UTILITIES
 # ----------------------------------------------------------
 def normalize(x):
@@ -168,6 +151,28 @@ def sample_frames(path, k):
                 frames.append(f)
     cap.release()
     return frames
+
+
+# ----------------------------------------------------------
+# WARM-UP RUN (to exclude initialization time from latency)
+# ----------------------------------------------------------
+print("Warming up model (excluding initialization time from latency)...")
+if video_index:
+    first_video = list(video_index.keys())[0]
+    first_video_path = find_video(first_video)
+    if first_video_path:
+        warmup_frames = sample_frames(first_video_path, min(FRAME_COUNTS))
+        if warmup_frames:
+            warmup_imgs = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in warmup_frames[:1]]
+            warmup_convo = [{"role": "user", "content": [
+                {"type": "text", "text": "Warm up."},
+                {"type": "image", "image": warmup_imgs[0]}]}]
+            warmup_text = processor.apply_chat_template(warmup_convo, tokenize=False,
+                                                         add_generation_prompt=True)
+            warmup_inputs = processor(images=[warmup_imgs[0]], text=warmup_text, return_tensors="pt").to(DEVICE)
+            with torch.no_grad():
+                _ = model(**warmup_inputs, output_hidden_states=True)
+print("Warm-up complete.")
 
 
 @torch.no_grad()
