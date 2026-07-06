@@ -54,13 +54,13 @@ try:
 except NameError:
     APP_DIR = os.getcwd()
 
-MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(APP_DIR, "model"))
+MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(APP_DIR, "model_instruct"))
 CHECKPOINT = os.getenv("CHECKPOINT", os.path.join(MODEL_DIR, "checkpoint-140"))
 MODEL_REPO_ID = os.getenv("MODEL_REPO_ID", "")
 TEMPORAL_ADAPTER_GDRIVE_ID = os.getenv("TEMPORAL_ADAPTER_GDRIVE_ID", "")
 TEMPORAL_ADAPTER_GDRIVE_URL = os.getenv("TEMPORAL_ADAPTER_GDRIVE_URL", "")
 BASE_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
-EMBED_MODEL = "Qwen/Qwen3-VL-Embedding-2B"
+EMBED_MODEL = "Qwen/Qwen3-VL-2B-Instruct"
 FRAMES = 8
 
 SAVE_DIR = os.getenv("SAVE_DIR", os.path.join(APP_DIR, "generated_summaries"))
