@@ -74,7 +74,7 @@ Video Input
     ↓
 Frame Extraction (8 frames)
     ↓
-Embedding Generation (Qwen3-VL-Embedding)
+Embedding Generation (Qwen3-VL-2B-Instruct)
     ↓
 ├─ Binary Classification (Normal/Anomalous)
 ├─ Multi-class Prediction (People/Weapon/Location/Category)
@@ -158,7 +158,7 @@ See `STREAMLIT_DEPLOYMENT_GUIDE.md` for detailed instructions
 
 | Metric | Value |
 |--------|-------|
-| Model Size | 4.26 GB (Qwen3-VL-Embedding) + 2B (Qwen3-VL-Instruct) |
+| Model Size | 4.26 GB (Qwen3-VL-2B-Instruct) |
 | Inference Time | 30-60 seconds per video |
 | Frame Processing | 8 evenly-spaced frames |
 | Supported Formats | MP4, AVI, MOV, MKV |
